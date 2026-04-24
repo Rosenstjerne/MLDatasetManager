@@ -1,0 +1,13 @@
+/.venv/
+/.deps/
+/.tmp/
+/.pytest_cache/
+/.ruff_cache/
+/build/
+/dist/
+/*.egg-info/
+/out-yolo/
+/.mypy_cache/
+__pycache__/
+*.py[cod]
+/CacaoMaturityDetection.coco
