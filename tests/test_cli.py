@@ -61,3 +61,49 @@ def test_cli_convert_yolo_to_coco(yolo_detection_dataset, tmp_path):
 
     assert result.exit_code == 0
     assert (output / "_annotations.coco.json").exists()
+
+
+def test_cli_convert_yolo_obb_to_coco(yolo_obb_dataset, tmp_path):
+    output = tmp_path / "coco"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "convert",
+            str(yolo_obb_dataset),
+            str(output),
+            "--from",
+            "yolo",
+            "--to",
+            "coco",
+            "--task",
+            "obb",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert (output / "_annotations.coco.json").exists()
+
+
+def test_cli_split_yolo_obb(yolo_obb_dataset, tmp_path):
+    output = tmp_path / "split"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "split",
+            str(yolo_obb_dataset),
+            str(output),
+            "--format",
+            "yolo",
+            "--to",
+            "yolo",
+            "--task",
+            "obb",
+            "--ratios",
+            "1,0,0",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert (output / "labels" / "train" / "image1.txt").exists()

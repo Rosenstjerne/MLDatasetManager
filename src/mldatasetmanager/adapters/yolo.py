@@ -16,6 +16,7 @@ from mldatasetmanager.core.models import (
     DatasetTask,
     ImageAsset,
     MultiPolygon,
+    OrientedBBox,
     Polygon,
 )
 from mldatasetmanager.reports import ValidationReport
@@ -24,8 +25,8 @@ from mldatasetmanager.reports import ValidationReport
 class YoloAdapter:
     format_name = "yolo"
     capabilities = AdapterCapabilities(
-        tasks={"detection", "instance-segmentation"},
-        geometries={"bbox", "polygon"},
+        tasks={"detection", "instance-segmentation", "oriented-detection"},
+        geometries={"bbox", "polygon", "obb"},
         coordinate_system="normalized",
     )
 
@@ -127,43 +128,62 @@ class YoloAdapter:
     def write(self, dataset: Dataset, path: Path, options: dict | None = None) -> int:
         options = options or {}
         task = DatasetTask(options.get("task", dataset.dataset_type.value))
-        if task not in {DatasetTask.DETECTION, DatasetTask.INSTANCE_SEGMENTATION}:
+        if task not in {
+            DatasetTask.DETECTION,
+            DatasetTask.INSTANCE_SEGMENTATION,
+            DatasetTask.ORIENTED_DETECTION,
+        }:
             raise ValueError(f"Unsupported YOLO task: {task}")
-
-        images_dir = path / "images" / "train"
-        labels_dir = path / "labels" / "train"
-        images_dir.mkdir(parents=True, exist_ok=True)
-        labels_dir.mkdir(parents=True, exist_ok=True)
 
         category_map = {category.id: index for index, category in enumerate(dataset.classes)}
         annotations_by_image = {image.id: [] for image in dataset.images}
         for annotation in dataset.annotations:
             annotations_by_image.setdefault(annotation.image_id, []).append(annotation)
 
+        split_names = _write_split_names(dataset, bool(options.get("split_output")))
         files_written = 0
-        for image in dataset.images:
-            target_image = images_dir / image.path.name
-            shutil.copy2(image.path, target_image)
-            files_written += 1
+        for split_name in split_names:
+            images_dir = path / "images" / split_name
+            labels_dir = path / "labels" / split_name
+            images_dir.mkdir(parents=True, exist_ok=True)
+            labels_dir.mkdir(parents=True, exist_ok=True)
+            split_image_ids = set(dataset.splits.get(split_name, []))
+            for image in dataset.images:
+                if (
+                    options.get("split_output")
+                    and split_image_ids
+                    and image.id not in split_image_ids
+                ):
+                    continue
+                target_file_name = _target_file_name(image)
+                target_image = images_dir / target_file_name
+                shutil.copy2(image.path, target_image)
+                files_written += 1
 
-            label_path = labels_dir / f"{image.path.stem}.txt"
-            rows = []
-            for annotation in annotations_by_image.get(image.id, []):
-                class_id = category_map[annotation.category_id]
-                if task == DatasetTask.DETECTION:
-                    rows.append(
-                        self._format_detection_row(class_id, annotation, image.width, image.height)
-                    )
-                else:
-                    rows.extend(
-                        self._format_segmentation_rows(
-                            class_id, annotation, image.width, image.height
+                label_path = labels_dir / f"{Path(target_file_name).stem}.txt"
+                rows = []
+                for annotation in annotations_by_image.get(image.id, []):
+                    class_id = category_map[annotation.category_id]
+                    if task == DatasetTask.DETECTION:
+                        rows.append(
+                            self._format_detection_row(
+                                class_id, annotation, image.width, image.height
+                            )
                         )
-                    )
-            label_path.write_text("\n".join(rows) + ("\n" if rows else ""), encoding="utf-8")
-            files_written += 1
+                    elif task == DatasetTask.ORIENTED_DETECTION:
+                        rows.append(
+                            self._format_obb_row(class_id, annotation, image.width, image.height)
+                        )
+                    else:
+                        rows.extend(
+                            self._format_segmentation_rows(
+                                class_id, annotation, image.width, image.height
+                            )
+                        )
+                label_path.write_text("\n".join(rows) + ("\n" if rows else ""), encoding="utf-8")
+                files_written += 1
 
-        self._write_data_yaml(path, dataset, task)
+        self._write_data_yaml(path, dataset, task, split_names)
         return files_written + 1
 
     def _format_detection_row(
@@ -179,6 +199,19 @@ class YoloAdapter:
         width = bbox.width / image_width
         height = bbox.height / image_height
         return self._format_row([class_id, x_center, y_center, width, height])
+
+    def _format_obb_row(
+        self,
+        class_id: int,
+        annotation,
+        image_width: int,
+        image_height: int,
+    ) -> str:
+        obb = self._obb_from_annotation(annotation)
+        values: list[int | float] = [class_id]
+        for x, y in obb.points:
+            values.extend([x / image_width, y / image_height])
+        return self._format_row(values)
 
     def _format_segmentation_rows(
         self,
@@ -201,11 +234,29 @@ class YoloAdapter:
     def _bbox_from_annotation(self, annotation) -> AxisAlignedBBox:
         if isinstance(annotation.geometry, AxisAlignedBBox):
             return annotation.geometry
+        if isinstance(annotation.geometry, OrientedBBox):
+            return _bbox_from_points(annotation.geometry.points)
         bbox = annotation.attributes.get("bbox")
         if isinstance(bbox, list) and len(bbox) == 4:
             x, y, width, height = (float(value) for value in bbox)
             return AxisAlignedBBox(x_min=x, y_min=y, x_max=x + width, y_max=y + height)
         raise ValueError(f"Annotation {annotation.id} does not have a bbox")
+
+    def _obb_from_annotation(self, annotation) -> OrientedBBox:
+        if isinstance(annotation.geometry, OrientedBBox):
+            return annotation.geometry
+        if isinstance(annotation.geometry, AxisAlignedBBox):
+            return _obb_from_bbox(annotation.geometry)
+        if isinstance(annotation.geometry, MultiPolygon):
+            if len(annotation.geometry.polygons) != 1:
+                raise ValueError(f"Annotation {annotation.id} must contain exactly one polygon")
+            points = annotation.geometry.polygons[0].points
+            if len(points) != 4:
+                raise ValueError(
+                    f"Annotation {annotation.id} polygon must contain exactly 4 points"
+                )
+            return OrientedBBox(points=points)
+        raise ValueError(f"Annotation {annotation.id} cannot be exported as OBB")
 
     def _format_row(self, values: list[int | float]) -> str:
         formatted = []
@@ -216,19 +267,25 @@ class YoloAdapter:
                 formatted.append(f"{value:.6f}".rstrip("0").rstrip("."))
         return " ".join(formatted)
 
-    def _write_data_yaml(self, path: Path, dataset: Dataset, task: DatasetTask) -> None:
+    def _write_data_yaml(
+        self,
+        path: Path,
+        dataset: Dataset,
+        task: DatasetTask,
+        split_names: list[str],
+    ) -> None:
         names = [category.name for category in dataset.classes]
         lines = [
             "path: .",
-            "train: images/train",
-            "val: images/train",
-            f"nc: {len(names)}",
-            "names:",
         ]
+        for split_name in split_names:
+            yaml_key = "val" if split_name == "val" else split_name
+            lines.append(f"{yaml_key}: images/{split_name}")
+        if "val" not in split_names and "train" in split_names:
+            lines.append("val: images/train")
+        lines.extend([f"nc: {len(names)}", "names:"])
         lines.extend(f"  {index}: {name}" for index, name in enumerate(names))
-        lines.append(
-            f"task: {'segment' if task == DatasetTask.INSTANCE_SEGMENTATION else 'detect'}"
-        )
+        lines.append(f"task: {_yolo_task_name(task)}")
         (path / "data.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -293,6 +350,8 @@ def _task_from_options_or_yaml(option_task: str | None, yaml_task: str | None) -
         return DatasetTask.DETECTION
     if task in {"segmentation", "segment", "instance-segmentation"}:
         return DatasetTask.INSTANCE_SEGMENTATION
+    if task in {"obb", "oriented-detection", "oriented_detection"}:
+        return DatasetTask.ORIENTED_DETECTION
     raise ValueError(f"Unsupported YOLO task: {task}")
 
 
@@ -359,6 +418,23 @@ def _read_yolo_label_row(
         raise ValueError(f"{label_path}:{line_number} class id must be an integer")
     if class_id not in category_ids:
         raise ValueError(f"{label_path}:{line_number} references unknown class id {class_id}")
+    if task == DatasetTask.ORIENTED_DETECTION:
+        if len(values) != 9:
+            raise ValueError(f"{label_path}:{line_number} OBB row must contain 9 values")
+        points = [
+            (values[index] * image_width, values[index + 1] * image_height)
+            for index in range(1, len(values), 2)
+        ]
+        bbox = _bbox_from_points(points)
+        return Annotation(
+            id=annotation_id,
+            image_id=image_id,
+            category_id=class_id,
+            task_type=DatasetTask.ORIENTED_DETECTION,
+            geometry=OrientedBBox(points=points),
+            attributes={"bbox": [bbox.x_min, bbox.y_min, bbox.width, bbox.height]},
+            source={"format": "yolo", "label_path": str(label_path), "line_number": line_number},
+        )
     if task == DatasetTask.INSTANCE_SEGMENTATION or len(values) > 5:
         if len(values) < 7 or len(values[1:]) % 2 != 0:
             raise ValueError(f"{label_path}:{line_number} segmentation row must contain x/y pairs")
@@ -400,3 +476,33 @@ def _bbox_from_points(points: list[tuple[float, float]]) -> AxisAlignedBBox:
     xs = [x for x, _ in points]
     ys = [y for _, y in points]
     return AxisAlignedBBox(x_min=min(xs), y_min=min(ys), x_max=max(xs), y_max=max(ys))
+
+
+def _obb_from_bbox(bbox: AxisAlignedBBox) -> OrientedBBox:
+    return OrientedBBox(
+        points=[
+            (bbox.x_min, bbox.y_min),
+            (bbox.x_max, bbox.y_min),
+            (bbox.x_max, bbox.y_max),
+            (bbox.x_min, bbox.y_max),
+        ]
+    )
+
+
+def _yolo_task_name(task: DatasetTask) -> str:
+    if task == DatasetTask.INSTANCE_SEGMENTATION:
+        return "segment"
+    if task == DatasetTask.ORIENTED_DETECTION:
+        return "obb"
+    return "detect"
+
+
+def _target_file_name(image: ImageAsset) -> str:
+    return str(image.metadata.get("target_file_name") or image.path.name)
+
+
+def _write_split_names(dataset: Dataset, split_output: bool) -> list[str]:
+    if not split_output:
+        return ["train"]
+    split_names = [name for name in ("train", "val", "test") if dataset.splits.get(name)]
+    return split_names or ["train"]

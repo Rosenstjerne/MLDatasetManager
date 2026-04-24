@@ -67,3 +67,44 @@ class ConversionReport(BaseModel):
 
     def write_json(self, path: str | Path) -> None:
         Path(path).write_text(self.model_dump_json(indent=2), encoding="utf-8")
+
+
+class MergeReport(BaseModel):
+    source_paths: list[str]
+    output_path: str
+    source_formats: list[str]
+    target_format: str
+    task: str
+    class_policy: str
+    validation: ValidationReport
+    files_written: int = 0
+    skipped_files: int = 0
+    summary: dict[str, Any] = Field(default_factory=dict)
+
+    @property
+    def success(self) -> bool:
+        return not self.validation.has_errors
+
+    def write_json(self, path: str | Path) -> None:
+        Path(path).write_text(self.model_dump_json(indent=2), encoding="utf-8")
+
+
+class SplitReport(BaseModel):
+    source_path: str
+    output_path: str
+    source_format: str
+    target_format: str
+    task: str
+    ratios: dict[str, float]
+    seed: int
+    stratify: str
+    validation: ValidationReport
+    files_written: int = 0
+    summary: dict[str, Any] = Field(default_factory=dict)
+
+    @property
+    def success(self) -> bool:
+        return not self.validation.has_errors
+
+    def write_json(self, path: str | Path) -> None:
+        Path(path).write_text(self.model_dump_json(indent=2), encoding="utf-8")

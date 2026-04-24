@@ -5,6 +5,7 @@ from mldatasetmanager.core.models import (
     Dataset,
     ImageAsset,
     MultiPolygon,
+    OrientedBBox,
     Polygon,
     RLEMask,
 )
@@ -16,6 +17,7 @@ __all__ = [
     "Dataset",
     "ImageAsset",
     "MultiPolygon",
+    "OrientedBBox",
     "Polygon",
     "RLEMask",
 ]

@@ -4,7 +4,13 @@ import math
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-from mldatasetmanager.core.models import AxisAlignedBBox, Dataset, MultiPolygon, RLEMask
+from mldatasetmanager.core.models import (
+    AxisAlignedBBox,
+    Dataset,
+    MultiPolygon,
+    OrientedBBox,
+    RLEMask,
+)
 from mldatasetmanager.reports import ValidationReport
 
 
@@ -142,10 +148,28 @@ def _validate_annotations(dataset: Dataset, report: ValidationReport) -> None:
         geometry = annotation.geometry
         if isinstance(geometry, AxisAlignedBBox):
             _validate_bbox(geometry, image.width, image.height, report, annotation.id)
+        elif isinstance(geometry, OrientedBBox):
+            for x, y in geometry.points:
+                _validate_point(x, y, image.width, image.height, report, annotation.id, "OBB")
+            if _polygon_area(geometry.points) <= 0:
+                report.add(
+                    "error",
+                    "OBB_AREA_INVALID",
+                    "Oriented bbox must have positive polygon area",
+                    annotation_id=annotation.id,
+                )
         elif isinstance(geometry, MultiPolygon):
             for polygon in geometry.polygons:
                 for x, y in polygon.points:
-                    _validate_point(x, y, image.width, image.height, report, annotation.id)
+                    _validate_point(
+                        x,
+                        y,
+                        image.width,
+                        image.height,
+                        report,
+                        annotation.id,
+                        "POLYGON",
+                    )
         elif isinstance(geometry, RLEMask):
             if geometry.size[0] <= 0 or geometry.size[1] <= 0:
                 report.add(
@@ -188,19 +212,28 @@ def _validate_point(
     image_height: int,
     report: ValidationReport,
     annotation_id: int | str,
+    prefix: str,
 ) -> None:
     if not math.isfinite(x) or not math.isfinite(y):
         report.add(
             "error",
-            "POLYGON_COORDINATE_INVALID",
-            "Polygon coordinate must be finite",
+            f"{prefix}_COORDINATE_INVALID",
+            f"{prefix.title()} coordinate must be finite",
             annotation_id=annotation_id,
         )
         return
     if x < 0 or y < 0 or x > image_width or y > image_height:
         report.add(
             "error",
-            "POLYGON_OUT_OF_BOUNDS",
-            "Polygon coordinates must be inside image boundaries",
+            f"{prefix}_OUT_OF_BOUNDS",
+            f"{prefix.title()} coordinates must be inside image boundaries",
             annotation_id=annotation_id,
         )
+
+
+def _polygon_area(points: list[tuple[float, float]]) -> float:
+    area = 0.0
+    for index, (x1, y1) in enumerate(points):
+        x2, y2 = points[(index + 1) % len(points)]
+        area += x1 * y2 - x2 * y1
+    return abs(area / 2)

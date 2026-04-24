@@ -16,6 +16,7 @@ from mldatasetmanager.core.models import (
     DatasetTask,
     ImageAsset,
     MultiPolygon,
+    OrientedBBox,
     Polygon,
     RLEMask,
 )
@@ -131,13 +132,46 @@ class CocoAdapter:
         )
 
     def write(self, dataset: Dataset, path: Path, options: dict | None = None) -> int:
+        options = options or {}
+        if options.get("split_output"):
+            return self._write_split_dataset(dataset, path)
+        return self._write_single_dataset(dataset, path)
+
+    def _write_split_dataset(self, dataset: Dataset, path: Path) -> int:
+        files_written = 0
+        split_names = [name for name, image_ids in dataset.splits.items() if image_ids]
+        if not split_names:
+            return self._write_single_dataset(dataset, path)
+        for split_name in split_names:
+            split_path = path / split_name
+            split_image_ids = set(dataset.splits[split_name])
+            split_dataset = Dataset(
+                id=f"{dataset.id}-{split_name}",
+                name=dataset.name,
+                dataset_type=dataset.dataset_type,
+                root=dataset.root,
+                classes=dataset.classes,
+                images=[image for image in dataset.images if image.id in split_image_ids],
+                annotations=[
+                    annotation
+                    for annotation in dataset.annotations
+                    if annotation.image_id in split_image_ids
+                ],
+                splits={split_name: list(split_image_ids)},
+                metadata=dataset.metadata,
+                provenance=dataset.provenance,
+            )
+            files_written += self._write_single_dataset(split_dataset, split_path)
+        return files_written
+
+    def _write_single_dataset(self, dataset: Dataset, path: Path) -> int:
         path.mkdir(parents=True, exist_ok=True)
         image_id_map = {image.id: index for index, image in enumerate(dataset.images)}
         annotation_items = []
         files_written = 0
 
         for image in dataset.images:
-            shutil.copy2(image.path, path / image.path.name)
+            shutil.copy2(image.path, path / _target_file_name(image))
             files_written += 1
 
         for index, annotation in enumerate(dataset.annotations, start=1):
@@ -163,7 +197,7 @@ class CocoAdapter:
             "images": [
                 {
                     "id": image_id_map[image.id],
-                    "file_name": image.path.name,
+                    "file_name": _target_file_name(image),
                     "width": image.width,
                     "height": image.height,
                 }
@@ -200,6 +234,19 @@ class CocoAdapter:
                 for polygon in polygons
             ]
             area = sum(abs(_polygon_area(polygon.points)) for polygon in polygons)
+        elif isinstance(annotation.geometry, OrientedBBox):
+            xs = [x for x, _ in annotation.geometry.points]
+            ys = [y for _, y in annotation.geometry.points]
+            bbox = AxisAlignedBBox(
+                x_min=max(0.0, min(xs)),
+                y_min=max(0.0, min(ys)),
+                x_max=min(float(image.width), max(xs)),
+                y_max=min(float(image.height), max(ys)),
+            )
+            segmentation = [
+                [coordinate for point in annotation.geometry.points for coordinate in point]
+            ]
+            area = abs(_polygon_area(annotation.geometry.points))
         else:
             raise ValueError(f"Unsupported COCO export geometry: {annotation.geometry.kind}")
 
@@ -309,3 +356,7 @@ def _polygon_area(points: list[tuple[float, float]]) -> float:
 
 def _clean_float(value: float) -> float:
     return round(float(value), 6)
+
+
+def _target_file_name(image: ImageAsset) -> str:
+    return str(image.metadata.get("target_file_name") or image.path.name)

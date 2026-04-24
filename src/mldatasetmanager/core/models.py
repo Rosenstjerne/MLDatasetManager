@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 class DatasetTask(StrEnum):
     DETECTION = "detection"
     INSTANCE_SEGMENTATION = "instance-segmentation"
+    ORIENTED_DETECTION = "oriented-detection"
 
 
 class AxisAlignedBBox(BaseModel):
@@ -46,6 +47,18 @@ class Polygon(BaseModel):
         return points
 
 
+class OrientedBBox(BaseModel):
+    kind: Literal["obb"] = "obb"
+    points: list[tuple[float, float]]
+
+    @field_validator("points")
+    @classmethod
+    def validate_points(cls, points: list[tuple[float, float]]) -> list[tuple[float, float]]:
+        if len(points) != 4:
+            raise ValueError("oriented bbox requires exactly 4 points")
+        return points
+
+
 class MultiPolygon(BaseModel):
     kind: Literal["multipolygon"] = "multipolygon"
     polygons: list[Polygon]
@@ -65,7 +78,7 @@ class RLEMask(BaseModel):
 
 
 Geometry = Annotated[
-    AxisAlignedBBox | Polygon | MultiPolygon | RLEMask,
+    AxisAlignedBBox | OrientedBBox | Polygon | MultiPolygon | RLEMask,
     Field(discriminator="kind"),
 ]
 

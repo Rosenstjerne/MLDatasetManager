@@ -27,6 +27,11 @@ def yolo_segmentation_dataset(tmp_path: Path) -> Path:
     return _make_yolo_dataset(tmp_path, "0 0.1 0.1 0.8 0.1 0.8 0.8 0.1 0.8\n", task="segment")
 
 
+@pytest.fixture()
+def yolo_obb_dataset(tmp_path: Path) -> Path:
+    return _make_yolo_dataset(tmp_path, "0 0.1 0.1 0.8 0.1 0.8 0.8 0.1 0.8\n", task="obb")
+
+
 def _make_coco_dataset(tmp_path: Path, segmentation) -> Path:
     root = tmp_path / "coco" / "train"
     root.mkdir(parents=True)
